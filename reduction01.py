@@ -1,38 +1,22 @@
-import sys,os
-import numpy as np
+# This code averages individual events and saves files in the format "eventXXX_EXPOSURE_DATE-OBS.fits"
 import os
+import numpy as np
+import logging
 from astropy.io import fits
-from datetime import datetime, timedelta
+from tqdm import tqdm
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def findprefix(i):
-    #function to find prefix of the ith event files from raw data
-    if i<10:
-        prefix = "event00" + str(i)
-    else:
-        prefix = "event0" + str(i)
-    return prefix
-    
+    """Returns the prefix of the ith event files from raw data"""
+    return f"event{int(i):03d}"
+
 def time_avg(timestamps):
-    """
-    Function will find an average of timestamps in list in YSO format and return string 
-    """
-    # Convert strings to datetime objects
+    """Computes the average timestamp from a list of ISO 8601 formatted timestamps"""
     datetime_objects = [datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%f") for ts in timestamps]
-
-    # Convert all times to seconds since the first timestamp
-    time_deltas = [(dt - datetime_objects[0]).total_seconds() for dt in datetime_objects]
-
-    # Compute the average of the time deltas
-    average_seconds = sum(time_deltas) / len(time_deltas)
-
-    # Compute the average datetime
-    average_datetime = datetime_objects[0] + timedelta(seconds=average_seconds)
-
-    # Convert back to string with milliseconds
-    average_timestamp = average_datetime.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-    
-    return average_timestamp
-
+    avg_timestamp = np.mean([dt.timestamp() for dt in datetime_objects])
+    return datetime.fromtimestamp(avg_timestamp).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
 def average_fits_files(fits_dir, i, output_path):
     """
@@ -40,53 +24,57 @@ def average_fits_files(fits_dir, i, output_path):
 
     Parameters:
     - fits_dir (str): Path to the directory containing FITS files
-    - ith event to be averaged
-    - output_path: it is where you want output to be stored
-    - returns output_filename (str): Name of the output FITS file
-    - all raw files have extension ".fit" but processed files from hereon will have ".fits"
+    - i (int): Event number to be averaged
+    - output_path (str): Directory where output will be stored
 
+    Returns:
+    - output_filename (str): Name of the output FITS file
     """
+
     prefix = findprefix(i)
     fits_files = [os.path.join(fits_dir, f) for f in os.listdir(fits_dir) if f.startswith(prefix) and f.endswith(".fit")]
 
-    data_list = []
-    j = 0 #index of each file to be averaged
-    avg_date = []
-    avg_dateobs = []
-    
-    # Read and store data from each FITS file
-    for file in fits_files:
-        with fits.open(file) as hduj:
-            data_list.append(hduj[0].data)
-            j += 1
-            #append DATE and DATE-OBS from header file
-            avg_date.append(hduj[0].header['DATE'])
-            avg_dateobs.append(hduj[0].header['DATE-OBS'])
-            
-    print(j)
-    # Convert to numpy array and compute the mean
-    data_stack = np.array(data_list)
-    averaged_data = np.mean(data_stack, axis=0)
+    if not fits_files:
+        logging.warning(f"No FITS files found for event {i} in {fits_dir}.")
+        return None
 
-    # Setting header from the first FITS file
+    # Read data and headers
+    data_list, avg_date, avg_dateobs = zip(*[
+        (fits.getdata(file), fits.getheader(file)['DATE'], fits.getheader(file)['DATE-OBS'])
+        for file in fits_files
+    ])
+
+    logging.info(f"Number of frames averaged: {len(fits_files)}")
+
+    # Compute averaged data
+    averaged_data = np.mean(np.array(data_list), axis=0)
+
+    # Load first header and update it
     hdr = fits.getheader(fits_files[0])
-    
-    #Everything else for the header
-    hdr['DATE'] = time_avg(avg_date)
-    hdr['DATE-OBS'] = time_avg(avg_dateobs)
-    hdr['NFRAMES'] = j
-    print(time_avg(avg_date))
-    
-    # Defining averaged filename
-    filename = prefix + "_" + str(hdr['EXPOSURE']) + "_" + time_avg(avg_dateobs) + ".fits"
+    avg_date_str = time_avg(avg_date)
+    avg_dateobs_str = time_avg(avg_dateobs)
 
-    # Write the averaged image to a new FITS file
-    new_file = os.path.join(output_path,filename)
+    hdr['DATE'] = avg_date_str
+    hdr['DATE-OBS'] = avg_dateobs_str
+    hdr['NFRAMES'] = len(fits_files)
+    
+    # Handle missing exposure time
+    exposure = hdr.get('EXPOSURE', 'UNKNOWN')
+
+    filename = f"{prefix}_{exposure}_{avg_dateobs_str}.fits"
+    new_file = os.path.join(output_path, filename)
+
+    # Ensure output directory exists
+    os.makedirs(output_path, exist_ok=True)
+
     fits.writeto(new_file, averaged_data, hdr, overwrite=True)
-
+    
+    logging.info(f"Averaged file saved as: {new_file}")
     return new_file
 
-fits_dir = "/home/manya/Documents/PHD2_CameraFrames_2025-02-28-190953/"
-output_path = "/home/manya/Documents/Reduction1/"
-average_fits_files(fits_dir, 1, output_path)
+# Example usage
+fits_dir = "/home/ashutosh/tifr/assignments/astronomy_and_astrophysics_2/algol_project/data/PHD2_CameraFrames_2025-02-28-190953/"
+output_path = "/home/ashutosh/tifr/assignments/astronomy_and_astrophysics_2/algol_project/data/Reduction1/"
 
+for i in tqdm(range(1, 88), desc="Averaging frames."):
+    average_fits_files(fits_dir, i, output_path)
