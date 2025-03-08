@@ -6,8 +6,10 @@ from astropy.visualization import ZScaleInterval
 from photutils.detection import DAOStarFinder
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy.spatial import KDTree
-from photutils.aperture import CircularAperture, CircularAnnulus
+from photutils.aperture import CircularAperture, CircularAnnulus, aperture_photometry
+from photutils.psf import fit_2dgaussian
 from astropy.io import fits
+from tqdm import tqdm
 
 
 class StarTracker:
@@ -71,7 +73,7 @@ class StarTracker:
 
     def track_algol(self):
         """Track Algol using PHDLOCK header positions as initial guess."""
-        for file in self.files:
+        for file in tqdm(self.files, desc="Tracking Algol."):
             file_path = os.path.join(self.input_folder, file)
             with fits.open(file_path) as hdul:
                 image_data = hdul[0].data
@@ -105,7 +107,7 @@ class StarTracker:
             self.ref_positions[i].append(refined_pos)
 
         # Track reference stars across all frames
-        for file_idx, file in enumerate(self.files[1:], start=1):
+        for file_idx, file in tqdm(enumerate(self.files[1:], start=1), desc="Tracking reference stars."):
             file_path = os.path.join(self.input_folder, file)
             with fits.open(file_path) as hdul:
                 image_data = hdul[0].data
@@ -127,7 +129,7 @@ class StarTracker:
     def save_pdf(self):
         """Save tracked stars as a multi-page PDF."""
         with PdfPages(self.output_pdf) as pdf:
-            for i, file in enumerate(self.files):
+            for i, file in tqdm(enumerate(self.files), desc="Saving tracked_stars.pdf"):
                 file_path = os.path.join(self.input_folder, file)
                 with fits.open(file_path) as hdul:
                     image_data = hdul[0].data
@@ -152,47 +154,169 @@ class StarTracker:
         print(f"Saved tracked positions to {self.output_pdf}")
 
     def run(self):
+        print("Begin Tracking.")
+        print("--------------")
         self.track_algol()
         self.track_reference_stars()
         self.save_pdf()
+        print("Tracking Done.")
+        print("--------------")
 
 
 class Photometry:
-    def __init__(self, algol_positions, ref_positions, timestamps, files):
+    def __init__(self, algol_positions, ref_positions, timestamps, files, input_folder):
         self.algol_positions = algol_positions
         self.ref_positions = ref_positions
         self.timestamps = timestamps
         self.files = files
-        self.aperture_width = self.find_aperture_width()
-        self.algol_flux = None
-        self.ref_flux = None
-        self.algol_rel_flux = None
+        self.input_folder = input_folder
+        #self.aperture_radius = self.find_aperture_radius()
+        
+        self.aperture_radius = 5
 
-    def find_aperture_width(self):
+        self.algol_flux = {}  # {timestamp: (flux, variance)}
+        self.ref_flux = [{} for _ in range(len(ref_positions))]  # [{timestamp: (flux, variance)}, ...]
+        self.algol_rel_flux = {}
+
+    '''
+    def gaussian_2d(self, xy, A, x0, y0, sigma_x, sigma_y, C):
+        """2D Gaussian function"""
+        x, y = xy
+        return A * np.exp(-(((x - x0) ** 2) / (2 * sigma_x ** 2) + ((y - y0) ** 2) / (2 * sigma_y ** 2))) + C
+    
+
+    def find_aperture_radius(self):
+        """
+        Fits a 2D Gaussian to Algol's profile and finds its aperture width.
+        Uses the first FITS file and applies the same aperture for all stars.
+        """
+        from scipy.optimize import curve_fit
+        file_path = os.path.join(self.input_folder, self.files[0])
+        with fits.open(file_path) as hdul:
+            image_data = hdul[0].data
+
+        x0, y0 = self.algol_positions[0]
+
+        # Define a small cutout region around Algol
+        cutout_size = 15
+        x_min, x_max = int(x0 - cutout_size), int(x0 + cutout_size)
+        y_min, y_max = int(y0 - cutout_size), int(y0 + cutout_size)
+        cutout = image_data[y_min:y_max, x_min:x_max]
+
+        # Generate coordinate grids
+        y_indices, x_indices = np.mgrid[y_min:y_max, x_min:x_max]
+        x_data, y_data = x_indices.ravel(), y_indices.ravel()
+        z_data = cutout.ravel()
+
+        # Initial guesses
+        A_guess = np.max(cutout) - np.median(cutout)
+        sigma_guess = cutout_size / 4
+        background_guess = np.median(cutout)
+        initial_guess = [A_guess, x0, y0, sigma_guess, sigma_guess, background_guess]
+
+        # Fit the Gaussian
+        try:
+            popt, _ = curve_fit(self.gaussian_2d, (x_data, y_data), z_data, p0=initial_guess)
+            _, _, _, sigma_x, sigma_y, _ = popt  # Extract Gaussian sigmas
+        except RuntimeError:
+            print("Gaussian fit failed! Using fallback aperture.")
+            return cutout_size / 4  # Fallback aperture
+
+        # Convert stddev to FWHM and take the average for a circular aperture
+        fwhm_x = 2.355 * sigma_x
+        fwhm_y = 2.355 * sigma_y
+        circular_fwhm = (fwhm_x + fwhm_y) / 2
+
+        print(circular_fwhm)
+
+        return circular_fwhm / 2
+
+    
+    def find_aperture_radius(self):
         """
         Fits a 2d gaussian to algol profile and finds its aperture width.
         Can be done for first file only and fixed thereafter.
         Same aperture is to be used for other reference stars. Note that 
         the data is noisy.
         """
-        pass
+        file_path = os.path.join(self.input_folder, self.files[0])
 
+        with fits.open(file_path) as hdul:
+            image_data = hdul[0].data
+
+        x0, y0 = self.algol_positions[0]
+
+        # Define a small cutout region around Algol
+        cutout_size = 15
+        x_min, x_max = int(x0 - cutout_size), int(x0 + cutout_size)
+        y_min, y_max = int(y0 - cutout_size), int(y0 + cutout_size)
+        cutout = image_data[y_min:y_max, x_min:x_max]
+
+        # Fit a 2D Gaussian
+        fit = fit_2dgaussian(cutout, xypos=(x0, y0))
+        print("Circular Aperture Radius = ", fit.fwhm)
+        return fit.fwhm
+        # Convert stddev to FWHM and take the average for a circular aperture
+        #fwhm_x = 2.355 * fit.x_stddev
+        #fwhm_y = 2.355 * fit.y_stddev
+        #circular_fwhm = (fwhm_x + fwhm_y) / 2
+
+        
+        #return circular_fwhm / 2
+    '''
     
     def calculate_flux(self, annulus_inner_radius, annulus_outer_radius):
         """
-        This function should calulate flux in each frame for Algol, and
-        reference stars and stores it in some dictionary in the format
-        {timestamp : (flux, variance)}.
-        Background subtraction is to be done.
-        Errors are supposed to be poissonian and independent of each other.
-        Errors(standard deviation) should be added in quadratures when variables
-        are added/subtracted.
-        Check Barlow before writing this method.
-
-        Each frame should be normalized by its exposure time before doing
-        any of the above.
+        Calculates flux for Algol and reference stars in each frame.
+        Background subtraction is applied.
+        Errors are assumed Poissonian and independent.
+        Each frame is normalized by its exposure time before calculations.
         """
-        pass
+        for i, file in tqdm(enumerate(self.files), desc="Calculating Flux"):
+            file_path = os.path.join(self.input_folder, file)
+            with fits.open(file_path) as hdul:
+                image_data = hdul[0].data
+                header = hdul[0].header
+                exposure_time = header["EXPOSURE"]
+
+            timestamp = self.timestamps[i]
+
+            # Process Algol separately
+            algol_aperture = CircularAperture(self.algol_positions[i], r=self.aperture_radius)
+            algol_annulus = CircularAnnulus(self.algol_positions[i], r_in=annulus_inner_radius, r_out=annulus_outer_radius)
+
+            phot_table_algol = aperture_photometry(image_data, algol_aperture)
+            annulus_table_algol = aperture_photometry(image_data, algol_annulus)
+
+            # Compute background for Algol
+            bkg_mean_algol = annulus_table_algol["aperture_sum"] / algol_annulus.area
+            bkg_total_algol = bkg_mean_algol * algol_aperture.area
+
+            # Compute flux and variance for Algol
+            flux_algol = (phot_table_algol["aperture_sum"][0] - bkg_total_algol) / exposure_time
+            var_algol = (phot_table_algol["aperture_sum"][0] + bkg_total_algol) / (exposure_time**2)
+
+            self.algol_flux[timestamp] = (flux_algol, var_algol)
+
+            # Process each reference star separately
+            for j, ref_pos in enumerate(self.ref_positions):
+                ref_aperture = CircularAperture(ref_pos[i], r=self.aperture_radius)
+                ref_annulus = CircularAnnulus(ref_pos[i], r_in=annulus_inner_radius, r_out=annulus_outer_radius)
+
+                phot_table_ref = aperture_photometry(image_data, ref_aperture)
+                annulus_table_ref = aperture_photometry(image_data, ref_annulus)
+
+                # Compute background for reference star
+                bkg_mean_ref = annulus_table_ref["aperture_sum"] / ref_annulus.area
+                bkg_total_ref = bkg_mean_ref * ref_aperture.area
+
+                # Compute flux and variance for reference star
+                flux_ref = (phot_table_ref["aperture_sum"][0] - bkg_total_ref) / exposure_time
+                var_ref = (phot_table_ref["aperture_sum"][0] + bkg_total_ref) / (exposure_time**2)
+
+                self.ref_flux[j][timestamp] = (flux_ref, var_ref)
+
+
 
 
     def relative_photmetry(self):
@@ -201,16 +325,24 @@ class Photometry:
         each of the reference stars.
         My recommended format is 
         {ref 1:
-        {timestamp:flux}
+        {timestamp:(flux, sigma)}
         ref 2:
-        {timestamp:flux}
+        {timestamp:(flux, sigma)}
         .
         .
         ref n:
-        {timestamp:flux}}
+        {timestamp:(flux, sigma)}}
         """
-        pass
-
+        for j in range(len(self.ref_positions)):
+            self.algol_rel_flux[f"ref_{j+1}"] = {}
+            for timestamp in self.algol_flux.keys():
+                flux_algol, var_algol = self.algol_flux[timestamp]
+                if timestamp in self.ref_flux[j]:
+                    flux_ref, var_ref = self.ref_flux[j][timestamp]
+                    rel_flux = flux_algol / flux_ref
+                    rel_var = rel_flux**2 * (var_algol / flux_algol**2 + var_ref / flux_ref**2)  # Error propagation
+                    self.algol_rel_flux[f"ref_{j+1}"][timestamp] = (rel_flux, np.sqrt(rel_var))
+        
 
     def save_pdf(self, output_file="algol_lightcurves.pdf"):
         """
@@ -218,4 +350,43 @@ class Photometry:
         to each reference star. Plot errorbars also. And saves it in 
         a pdf file, one plot per page.
         """
+        with PdfPages(output_file) as pdf:
+            for ref_name, flux_dict in tqdm(self.algol_rel_flux.items(), desc="Saving Lightcurves."):
+                timestamps = self.timestamps
+                time_labels = [ts.split("T")[1][:-7] for ts in timestamps]
 
+                flux_values = np.array([flux_dict[t][0] for t in timestamps]).flatten()
+                flux_errors = np.array([flux_dict[t][1] for t in timestamps]).flatten()
+                
+                plt.figure(figsize=(8, 6))
+                plt.errorbar(time_labels, flux_values, yerr=flux_errors, color="k", ecolor="red", fmt='o', capsize=3)
+                plt.xlabel("Time(UTC)")
+                plt.ylabel("Relative Flux (Algol / " + ref_name + ")")
+                plt.title(f"Algol Light Curve (Relative to {ref_name})")
+                plt.grid(True)
+                plt.ylim(0, 255)
+                
+                step = max(1, len(time_labels) // 10)  # Show ~10 ticks max
+                plt.xticks(time_labels[::step], rotation=45)
+                pdf.savefig()
+                plt.close()
+
+        print(f"Saved light curves to {output_file}")
+
+    def run(self):
+        print("Begin Photometry")
+        print("----------------")
+        self.calculate_flux(2*self.aperture_radius, 3*self.aperture_radius)
+        self.relative_photmetry()
+        self.save_pdf()
+        print("Photometry Done")
+        print("----------------")
+
+
+input_folder = "/home/ashutosh/tifr/assignments/astronomy_and_astrophysics_2/algol_project/data/calibrated_frames/"
+
+tracker = StarTracker(input_folder)
+tracker.run()
+
+photometry = Photometry(tracker.algol_positions, tracker.ref_positions, tracker.timestamps, tracker.files, input_folder)
+photometry.run()
