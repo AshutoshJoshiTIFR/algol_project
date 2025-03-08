@@ -158,137 +158,64 @@ class StarTracker:
 
 
 class Photometry:
-    def __init__(self, input_folder, algol_positions, reference_positions, timestamps, aperture_radius=5, annulus_radius=(10, 15), output_pdf="light_curves.pdf"):
-        self.input_folder = input_folder
-        self.aperture_radius = aperture_radius
-        self.annulus_radius = annulus_radius
-        self.output_pdf = output_pdf
+    def __init__(self, algol_positions, ref_positions, timestamps, files):
         self.algol_positions = algol_positions
-        self.reference_positions = reference_positions
+        self.ref_positions = ref_positions
         self.timestamps = timestamps
+        self.files = files
+        self.aperture_width = self.find_aperture_width()
+        self.algol_flux = None
+        self.ref_flux = None
+        self.algol_rel_flux = None
 
-    def get_sorted_files(self):
-        """Sort files by timestamp."""
-        files = [f for f in os.listdir(self.input_folder) if f.endswith("_df.fits") and f.startswith("algol")]
-        files.sort(key=lambda x: x.split("_")[2])  # Sorting by timestamp
-        return files
-
-    def perform_photometry(self, algol_positions, reference_positions, timestamps):
+    def find_aperture_width(self):
         """
-        Perform aperture photometry for Algol and reference stars.
-        Return fluxes and errors for Algol and reference stars.
+        Fits a 2d gaussian to algol profile and finds its aperture width.
+        Can be done for first file only and fixed thereafter.
+        Same aperture is to be used for other reference stars. Note that 
+        the data is noisy.
         """
-        algol_positions = self.algol_positions
-        reference_positions = self.reference_positions
-        timestamps = self.timestamps
-        algol_fluxes = []
-        algol_errors = []
-        ref_fluxes = {i: [] for i in range(len(reference_positions))}
-        ref_errors = {i: [] for i in range(len(reference_positions))}
+        pass
 
-        sorted_files = self.get_sorted_files()
-
-        for i, timestamp in enumerate(timestamps):
-            # Find the matching filename for the timestamp
-            matching_file = next((f for f in sorted_files if timestamp in f), None)
-            if matching_file is None:
-                print(f"Warning: No file found for timestamp {timestamp}")
-                continue
-
-            file_path = os.path.join(self.input_folder, matching_file)
-
-            # Open the FITS file
-            with fits.open(file_path) as hdul:
-                image_data = hdul[0].data
-                exposure_time = hdul[0].header["EXPOSURE"]
-
-            # Perform aperture photometry for Algol
-            algol_flux, algol_error = self.calculate_flux(image_data, algol_positions[i])
-            algol_flux /= exposure_time  # Normalize by exposure time
-
-            # Append Algol's flux and error
-            algol_fluxes.append(algol_flux)
-            algol_errors.append(algol_error)
-
-            # Perform aperture photometry for reference stars
-            for j, ref_pos in enumerate(reference_positions):
-                ref_flux, ref_error = self.calculate_flux(image_data, ref_pos[i])
-                ref_flux /= exposure_time  # Normalize by exposure time
-
-                # Store flux and errors for reference stars
-                ref_fluxes[j].append(ref_flux)
-                ref_errors[j].append(ref_error)
-
-        return algol_fluxes, algol_errors, ref_fluxes, ref_errors
-
-    def calculate_flux(self, image_data, position):
+    
+    def calculate_flux(self, annulus_inner_radius, annulus_outer_radius):
         """
-        Calculate the flux and error for a given star position using aperture photometry.
-        Propagates error from the star signal and the background noise in the annulus.
+        This function should calulate flux in each frame for Algol, and
+        reference stars and stores it in some dictionary in the format
+        {timestamp : (flux, variance)}.
+        Background subtraction is to be done.
+        Errors are supposed to be poissonian and independent of each other.
+        Errors(standard deviation) should be added in quadratures when variables
+        are added/subtracted.
+        Check Barlow before writing this method.
+
+        Each frame should be normalized by its exposure time before doing
+        any of the above.
         """
-        if position is None:
-            return 0, 0  # No flux if no position is found
-
-        y, x = position
-        aperture = CircularAperture((x, y), r=self.aperture_radius)
-        annulus = CircularAnnulus((x, y), r_in=self.annulus_radius[0], r_out=self.annulus_radius[1])
-
-        # Mask the image for aperture and annulus
-        aperture_mask = aperture.to_mask(method='center')
-        annulus_mask = annulus.to_mask(method='center')
-
-        # Get the flux and background in the annulus
-        aperture_flux = aperture_mask.multiply(image_data).sum()
-        annulus_flux = annulus_mask.multiply(image_data).sum()
-
-        # Estimate background noise using the annulus
-        background = annulus_flux / annulus_mask.area
-        annulus_std = np.std(image_data[annulus_mask.data > 0])
-
-        # Subtract background from aperture flux
-        flux = aperture_flux - background * aperture_mask.area
-
-        # Calculate the error
-        error = np.sqrt(flux + (annulus_std ** 2) * aperture_mask.area)
-
-        return flux, error
-
-    def save_light_curve_pdf(self, algol_fluxes, algol_errors, ref_fluxes, ref_errors):
-        """Save light curves as a PDF."""
-        with PdfPages(self.output_pdf) as pdf:
-            # Create plot for Algol
-            plt.figure(figsize=(8, 6))
-            plt.errorbar(range(len(algol_fluxes)), algol_fluxes, yerr=algol_errors, fmt='o', label="Algol")
-            plt.title("Algol Light Curve")
-            plt.xlabel("Frame")
-            plt.ylabel("Flux")
-            plt.legend()
-            pdf.savefig()
-            plt.close()
-
-            # Create plots for reference stars
-            for i in range(len(ref_fluxes)):
-                plt.figure(figsize=(8, 6))
-                plt.errorbar(range(len(ref_fluxes[i])), ref_fluxes[i], yerr=ref_errors[i], fmt='o', label=f"Ref Star {i+1}")
-                plt.title(f"Reference Star {i+1} Light Curve")
-                plt.xlabel("Frame")
-                plt.ylabel("Flux")
-                plt.legend()
-                pdf.savefig()
-                plt.close()
-
-        print(f"Saved light curves to {self.output_pdf}")
-
-    def run(self):
-        algol_fluxes, algol_errors, ref_fluxes, ref_errors = self.perform_photometry(self.algol_positions, self.reference_positions, self.timestamps)
-        self.save_light_curve_pdf(algol_fluxes, algol_errors, ref_fluxes, ref_errors)
+        pass
 
 
-if __name__ == "__main__":
-    input_folder = "/home/ashutosh/tifr/assignments/astronomy_and_astrophysics_2/algol_project/data/calibrated_frames"
-    tracker = StarTracker(input_folder)
-    tracker.run()
+    def relative_photmetry(self):
+        """
+        This function calculates the relative flux of algol with respect to 
+        each of the reference stars.
+        My recommended format is 
+        {ref 1:
+        {timestamp:flux}
+        ref 2:
+        {timestamp:flux}
+        .
+        .
+        ref n:
+        {timestamp:flux}}
+        """
+        pass
 
-    # For photometry, you can initialize with tracked positions
-    photometry = Photometry(input_folder, tracker.algol_positions, tracker.ref_positions, tracker.timestamps)
-    photometry.run()
+
+    def save_pdf(self, output_file="algol_lightcurves.pdf"):
+        """
+        This function plots the relative flux of algol with respect
+        to each reference star. Plot errorbars also. And saves it in 
+        a pdf file, one plot per page.
+        """
+
