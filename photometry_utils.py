@@ -265,7 +265,7 @@ class Photometry:
         #return circular_fwhm / 2
     '''
     
-    def calculate_flux(self, annulus_inner_radius, annulus_outer_radius):
+    def calculate_flux(self, annulus_inner_radius, annulus_outer_radius, adu=48.0):
         """
         Calculates flux for Algol and reference stars in each frame.
         Background subtraction is applied.
@@ -293,8 +293,8 @@ class Photometry:
             bkg_total_algol = bkg_mean_algol * algol_aperture.area
 
             # Compute flux and variance for Algol
-            flux_algol = (phot_table_algol["aperture_sum"][0] - bkg_total_algol) / exposure_time
-            var_algol = (phot_table_algol["aperture_sum"][0] + bkg_total_algol) / (exposure_time**2)
+            flux_algol = (phot_table_algol["aperture_sum"][0] - bkg_total_algol) * adu / exposure_time
+            var_algol = (phot_table_algol["aperture_sum"][0] + bkg_total_algol) * adu/ (exposure_time**2)
 
             self.algol_flux[timestamp] = (flux_algol, var_algol)
 
@@ -311,8 +311,8 @@ class Photometry:
                 bkg_total_ref = bkg_mean_ref * ref_aperture.area
 
                 # Compute flux and variance for reference star
-                flux_ref = (phot_table_ref["aperture_sum"][0] - bkg_total_ref) / exposure_time
-                var_ref = (phot_table_ref["aperture_sum"][0] + bkg_total_ref) / (exposure_time**2)
+                flux_ref = (phot_table_ref["aperture_sum"][0] - bkg_total_ref) * adu / exposure_time
+                var_ref = (phot_table_ref["aperture_sum"][0] + bkg_total_ref) * adu / (exposure_time**2)
 
                 self.ref_flux[j][timestamp] = (flux_ref, var_ref)
 
@@ -359,7 +359,7 @@ class Photometry:
                 flux_errors = np.array([flux_dict[t][1] for t in timestamps]).flatten()
                 
                 plt.figure(figsize=(8, 6))
-                plt.errorbar(time_labels, flux_values, yerr=flux_errors, color="k", ecolor="red", fmt='o', capsize=3)
+                plt.errorbar(time_labels, flux_values, yerr=flux_errors, color="k",linestyle="-", ecolor="red", fmt='o', capsize=3)
                 plt.xlabel("Time(UTC)")
                 plt.ylabel("Relative Flux (Algol / " + ref_name + ")")
                 plt.title(f"Algol Light Curve (Relative to {ref_name})")
